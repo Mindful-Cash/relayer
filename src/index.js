@@ -1,8 +1,15 @@
+/** Modules */
 require('dotenv').config();
 const logger = require('perfect-logger');
 const Web3 = require('web3');
+const BigNumber = require('bignumber.js');
 
+/** ABI */
 const MindfulProxyAbi = require('./abi/MindfulProxy.json');
+const Erc20Abi = require('./abi/Erc20.json');
+
+/** Utils */
+const api = require('./api.js');  
 
 const web3 = new Web3(new Web3.providers.HttpProvider(`https://kovan.infura.io/v3/${process.env.INFURA_KEY}`));
 const signer = web3.eth.accounts.privateKeyToAccount(process.env.PRIVATE_KEY);
@@ -22,19 +29,108 @@ async function run() {
     logger.info(`Loaded signer address: ${signer.address}`);
     logger.info(`Loaded MindfulProxy: ${process.env.MINDFUL_PROXY_ADDRESS}`);
 
-    var sellStrategies = await mindfulProxy.methods.getSellStrategies().call();
-    var buyStrategies = await mindfulProxy.methods.getBuyStrategies().call();
+    let sellStrategies = await mindfulProxy.methods.getSellStrategies().call();
+    let buyStrategies = await mindfulProxy.methods.getBuyStrategies().call();
 
     logger.info(`Number of sell strategies found: ${sellStrategies.length}`);
     logger.info(`Number of buy strategies found: ${buyStrategies.length}`);
 
     sellStrategies.forEach(async(sellStartegy) => {
-        var chakraAddress = await mindfulProxy.sellStrategyChakra(sellStartegy.sellStrategyId).call();
+        if(sellStartegy.isActive) {
+            let chakraAddress = await mindfulProxy.methods.sellStrategyChakra(sellStartegy.sellStrategyId).call();
+            let chakraManager = await mindfulProxy.methods.chakraManager(chakraAddress).call();
+            let sellTokens = sellStartegy.sellTokens;
+            let sellPrices = sellStartegy.prices;
+            let isExecuted = sellStartegy.isExecuted;
+            
+            let sellTokensPrices = await api.fetchTokenPrices(sellTokens);
+            
+            for(i=0; i < sellTokensPrices.length; i++) {
+                if((prices[tokens[i]].usd >= web3.utils.fromWei(sellPrices[i], 'ether')) && (!isExecuted[i])) {
+                    let erc20 = new web3.eth.Contract(Erc20Abi, sellTokens[i]);
 
+                    let availableAllowance = await erc20.methods.allowance(chakraManager, mindfulProxy.address).call();
+                    let isEnoughAllowance = web3.utils.fromWei(availableAllowance, 'ether')  >= web3.utils.fromWei(sellPrices[i], 'ether');
+                    
+                    if(isEnoughAllowance) {
+
+                        let arg = {
+                            _chakra: chakraAddress,
+                            _sellToken: sellTokens[i],
+                            _sellStrategyId: sellStartegy.sellStrategyId,
+                            _sellTokenIndex: i,
+                            _poolAmount: 0,
+                            _minQuoteToken: 0                                               // this does not matter as the sender is a relayer
+                        }
+
+                        try {
+                            await mindfulProxy.methods.fromChakra(arg).call();
+                        } catch (error) {
+                            logger.warn('Failed to DCA out');
+                        }
+
+                        await mindfulProxy.methods.fromChakra(arg).send({gasLimit: '100000000000'});
+                    }
+                    else {
+                        logger.warn('Not enough allowance available from Chakra manager');
+                    }
+                }
+            }
+        }
     });
 
     buyStrategies.forEach(async(buyStrategy) => {
-        var chakraAddress = await mindfulProxy.sellStrategyChakra(buyStrategy.buyStrategyId).call();
+        if(buyStrategy.isActive) {
+            logger.info(`Active buy strategy id: ${buyStrategy.buyStrategyId}`);
+
+            let chakraAddress = await mindfulProxy.methods.sellStrategyChakra(buyStrategy.buyStrategyId).call();
+            let chakraManager = await mindfulProxy.methods.chakraManager(chakraAddress).call();
+            let buyToken = buyStrategy.buyToken;
+            let buyAmount = buyStrategy.buyAmount;
+            let interBuyDelay = new BigNumber(buyStrategy.interBuyDelay);
+            let lastBuyTimestamp = new BigNumber(buyStrategy.lastBuyTimestamp);
+
+            logger.info(`Chakra address: ${chakraAddress}`);
+            logger.info(`Chakra manager: ${chakraManager}`);
+
+            // current timestamp in UTC milliseconds
+            let currentTimestamp = new BigNumber(Math.floor(new Date().getTime() / 1000));
+
+            if(currentTimestamp.isGreaterThanOrEqualTo(lastBuyTimestamp.plus(interBuyDelay))) {
+                logger.info(`InterBuyDelay passed for id: ${buyStrategy.buyStrategyId}`);
+
+                let erc20 = new web3.eth.Contract(Erc20Abi, buyToken);
+                let availableAllowance = await erc20.methods.allowance(chakraManager, mindfulProxy.address).call();
+                let isEnoughAllowance = web3.utils.fromWei(availableAllowance, 'ether')  >= web3.utils.fromWei(buyAmount, 'ether');
+
+                if(isEnoughAllowance) {
+                    let poolAmount = new BigNumber(0);
+
+                    try {
+                        await mindfulProxy.methods.toChakra(
+                            chakraAddress,
+                            buyToken,
+                            poolAmount,
+                            buyAmount,
+                            buyStrategy.buyStrategyId
+                        ).call();
+                    } catch (error) {
+                        logger.warn('Failed to DCA in');
+                    }
+
+                    await mindfulProxy.methods.toChakra(
+                        chakraAddress,
+                        buyToken,
+                        poolAmount,
+                        buyAmount,
+                        buyStrategy.buyStrategyId
+                    ).send({gasLimit: '100000000000'});
+                }
+                else {
+                    logger.warn('Not enough allowance available from Chakra manager');
+                }
+            }
+        }
     });
 }
 
