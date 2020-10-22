@@ -6,6 +6,7 @@ const BigNumber = require('bignumber.js');
 
 /** ABI */
 const MindfulProxyAbi = require('./abi/MindfulProxy.json');
+const ChakraAbi = require('./abi/Chakra.json');
 const Erc20Abi = require('./abi/Erc20.json');
 
 /** Utils */
@@ -42,18 +43,41 @@ async function run() {
             let sellTokens = sellStartegy.sellTokens;
             let sellPrices = sellStartegy.prices;
             let isExecuted = sellStartegy.isExecuted;
-            
-            let sellTokensPrices = await api.fetchTokenPrices(sellTokens);
-            
-            for(i=0; i < sellTokensPrices.length; i++) {
-                if((prices[tokens[i]].usd >= web3.utils.fromWei(sellPrices[i], 'ether')) && (!isExecuted[i])) {
-                    let erc20 = new web3.eth.Contract(Erc20Abi, sellTokens[i]);
 
-                    let availableAllowance = await erc20.methods.allowance(chakraManager, mindfulProxy.address).call();
+            // get chakra tokens
+            let chakra = new web3.eth.Contract(ChakraAbi, chakraAddress);
+            let chakraTokens = await chakra.methods.getTokens().call();
+
+            // get chakra tokens prices
+            let chakraTokensPrices = await api.fetchTokenPrices(chakraTokens);
+
+            // get chakra amounts
+            let chakraTokensAmounts = [];
+            for(i=0; i < chakraTokens.length; i++) {
+                let erc20 = new web3.eth.Contract(Erc20Abi, chakraTokens[i]);
+                let chakraTokenAmount = new BigNumber(await erc20.methods.balanceOf(chakra.address).call());
+                chakraTokensAmounts.push(chakraTokenAmount);
+            }
+
+            // calculate chakra value
+            let chakraValue = new BigNumber(0);
+            for(i=0; i < chakraTokens; i++) {
+                logger.info(`${chakraTokens[i]} Amount: ${chakraTokenAmount.toString()}`);
+                logger.info(`${chakraTokens[i]} Price: ${chakraTokensPrices[chakraTokens[i]].usd}`);
+
+                chakraValue.plus(chakraTokenAmount.multipliedBy(chakraTokensPrices[chakraTokens[i]].usd));
+            }
+            logger.info(`Chakra value: ${chakraValue.toString()}`);
+            
+            // loop through all strategy sell prices
+            // if current Chakra value is greater than or equal a sell price, and that price is not executed yet
+            // check allowance from chakra manager to Mindful proxy, and call fromChakra()
+            for(i=0; i < sellPrices.length; i++) {
+                if((chakraValue.isGreaterThanOrEqualTo(new BigNumber(sellPrices[i]))) && (!isExecuted[i])) {
+                    let availableAllowance = await chakra.methods.allowance(chakraManager, mindfulProxy.address).call();
                     let isEnoughAllowance = web3.utils.fromWei(availableAllowance, 'ether')  >= web3.utils.fromWei(sellPrices[i], 'ether');
                     
                     if(isEnoughAllowance) {
-
                         let arg = {
                             _chakra: chakraAddress,
                             _sellToken: sellTokens[i],
