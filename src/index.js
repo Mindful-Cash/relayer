@@ -158,4 +158,4 @@ async function run() {
     });
 }
 
-run()
+setInterval(function(){ run()},60000)
